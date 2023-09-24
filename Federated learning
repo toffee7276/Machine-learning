@@ -1,0 +1,238 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from keras.models import Sequential
+from keras.layers import Dense
+from keras.layers import Flatten
+from keras.layers import Dropout
+from keras.layers import TimeDistributed
+from keras.layers.convolutional import Conv1D
+from keras.layers.convolutional import MaxPooling1D
+from keras.utils import to_categorical
+from keras import backend as K
+from keras.callbacks import EarlyStopping, ModelCheckpoint
+from keras.models import load_model, model_from_json
+from keras.metrics import CategoricalAccuracy, CategoricalCrossentropy
+from keras.wrappers.scikit_learn import KerasClassifier
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import confusion_matrix, auc, roc_curve, roc_auc_score, precision_score, recall_score, f1_score, accuracy_score, classification_report
+from numpy.random import seed
+from tensorflow import random
+
+"""###DATASET LOAD FUNCTIONS"""
+
+def load_file(filepath):
+	dataframe = pd.read_csv(filepath, header=None, delim_whitespace=True)
+	return dataframe.values
+
+def load_group(filenames, prefix=''):
+	loaded = list()
+	for name in filenames:
+		data = load_file(prefix + name)
+		loaded.append(data)
+	loaded = np.dstack(loaded)
+	return loaded
+
+
+def load_dataset_group(group, prefix=''):
+	filepath = prefix + group + '/Inertial Signals/'
+	filenames = list()
+	filenames += ['total_acc_x_'+group+'.txt', 'total_acc_y_'+group+'.txt', 'total_acc_z_'+group+'.txt']
+	filenames += ['body_acc_x_'+group+'.txt', 'body_acc_y_'+group+'.txt', 'body_acc_z_'+group+'.txt']
+	filenames += ['body_gyro_x_'+group+'.txt', 'body_gyro_y_'+group+'.txt', 'body_gyro_z_'+group+'.txt']
+	X = load_group(filenames, filepath)
+	y = load_file(prefix + group + '/y_'+group+'.txt')
+	return X, y
+
+def load_dataset(prefix=''):
+	X_train, y_train = load_dataset_group('train', prefix + 'UCI-HAR Dataset/')
+	print("Train Shapes : ")
+	print(X_train.shape, y_train.shape)
+	X_test, y_test = load_dataset_group('test', prefix + 'UCI-HAR Dataset/')
+	print("Test Shapes : ")
+	print(X_test.shape, y_test.shape)
+	y_train = y_train - 1
+	y_test = y_test - 1
+	y_train = to_categorical(y_train)
+	y_test = to_categorical(y_test)
+	print("Shapes after one-hot encoding : ")
+	print(X_train.shape, y_train.shape, X_test.shape, y_test.shape)
+	return X_train, y_train, X_test, y_test
+
+"""###MODEL CONSTRUCTION"""
+
+def create_model(model):
+    classifier = KerasClassifier(model, verbose=2)
+    return classifier
+
+def model():
+    seed(17)
+    random.set_seed(17)
+    
+    K.clear_session()
+    model = Sequential()
+    model.add(Conv1D(filters=64, kernel_size=2, activation='relu',input_shape=(n_timesteps,n_features)))
+    model.add(Conv1D(filters=64, kernel_size=3, activation='relu'))
+    model.add(Dropout(0.5))
+    model.add(MaxPooling1D(pool_size=2))
+    model.add(Flatten())
+    model.add(Dense(100, activation='relu'))
+    model.add(Dense(n_outputs, activation='softmax'))
+    model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+    return model
+
+"""###GRIDSEARCH FOR HYPERPARAMETER OPTIMIZATION"""
+
+def grid(classifier,X_train,y_train):
+    batch_size = [8,32]
+    epochs = [10,20]
+    validation_split=[0.2]
+    param_grid = dict(batch_size=batch_size, epochs=epochs, validation_split=validation_split)
+    grid = GridSearchCV(estimator=classifier, param_grid=param_grid, n_jobs=-1, cv=5, return_train_score=True, verbose=2)
+    grid_result = grid.fit(X_train, y_train)
+    print("Best: %f using %s" % (grid_result.best_score_, grid_result.best_params_))
+    means = grid_result.cv_results_['mean_test_score']
+    stds = grid_result.cv_results_['std_test_score']
+    params = grid_result.cv_results_['params']
+    for mean, stdev, param in zip(means, stds, params):
+        print("%f (%f) with: %r" % (mean, stdev, param))
+    return grid_result
+
+"""###MODEL EVALUATOR"""
+
+def evaluate_model(X_train, y_train, X_test, y_test, params, model):
+    epochs, batch_size = params["epochs"], params["batch_size"]
+    es =EarlyStopping(monitor='val_loss', patience=5)
+    classifier=model()
+    history = classifier.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, verbose=2, validation_split=0.2, callbacks=[es])
+    _, accuracy = classifier.evaluate( X_test, y_test, batch_size=batch_size, verbose=0)
+    return history, accuracy, classifier
+
+"""###PLOT LOSS FUNCTION"""
+
+def plot_loss(results):
+    plt.style.use('seaborn-whitegrid')
+    sns.set(style="white", font_scale = 1.5)
+    fig, axes = plt.subplots(1,2, figsize=(20,10), sharex=True)
+    axes[0].set_title("Model Loss")
+    axes[0].set_ylabel('Loss')
+    axes[0].set_xlabel("No. of epochs")
+    axes[0].plot(results['loss'], label='train', )
+    axes[0].plot(results['val_loss'], label='test')
+    axes[0].legend()
+    axes[1].set_title("Model Accuracy")
+    axes[1].set_ylabel('Accuracy')
+    axes[1].set_xlabel("No. of epochs")
+    axes[1].plot(results['accuracy'], label='train')
+    axes[1].plot(results['val_accuracy'], label='test')
+    axes[1].legend()
+    plt.show()
+    return
+
+"""###RUN MODEL FUNCTION"""
+
+score_list=[]
+def run_model(model, grid_result, X_train, y_train, X_test, y_test):
+    global score_list
+    history, score, classifier = evaluate_model(X_train, y_train, X_test, y_test, grid_result.best_params_, model)
+    score = score*100.0
+    score_list.append(score)
+    print('ACCURACY > %.3f' % (score))
+    results=pd.DataFrame(history.history, index=history.epoch)
+    return results, classifier
+
+def run(model, X_train, y_train, X_test, y_test):
+    classifier=create_model(model)
+    grid_result=grid(classifier,X_train,y_train)
+    results, classifier=run_model(model, grid_result, X_train, y_train, X_test, y_test)
+    plot_loss(results)
+    return classifier
+
+"""###LOADING THE DATASET"""
+
+X_train, y_train, X_test, y_test = load_dataset(prefix="/content/drive/MyDrive/MiniProject/")
+n_timesteps,n_features, n_outputs = X_train.shape[1], X_train.shape[2], y_train.shape[1]
+print("timesteps: ",n_timesteps,"features: ",n_features,"ouputs: ",n_outputs)
+
+"""###RUNNING THE MODEL"""
+
+classifier=run(model, X_train, y_train, X_test, y_test)
+
+"""##FEDERATED LEARNING
+
+###LOAD and SPLIT DATASET
+"""
+
+def split_and_load_dataset(prefix,num_of_splits):
+  X_train, y_train, X_test, y_test = load_dataset(prefix=prefix)
+  X_train_splitted = np.split(X_train[:7350],num_of_splits,axis=0)
+  y_train_splitted = np.split(y_train[:7350],num_of_splits,axis=0)
+  X_test_splitted = np.split(X_test[:2940],num_of_splits,axis=0)
+  y_test_splitted = np.split(y_test[:2940],num_of_splits,axis=0)
+  print("Sizes of each Split : ")
+  print(X_train_splitted[0].shape,y_train_splitted[0].shape,X_test_splitted[0].shape,y_test_splitted[0].shape)
+  return X_train_splitted,y_train_splitted,X_test_splitted,y_test_splitted
+
+"""###FEDERATED MODEL TRAINING"""
+
+def federated_model_training(model,X_train_splitted,y_train_splitted,X_test_splitted,y_test_splitted):
+  classifiers = []
+  for i in range(0,len(X_train_splitted)):
+    print("-------------------> Running model number : "+str(i+1))
+    classifiers.append(run(model,X_train_splitted[i],y_train_splitted[i],X_test_splitted[i],y_test_splitted[i]))
+  return classifiers
+
+"""###FEDERATED MODEL COMBINED PREDICTION"""
+
+def federated_model_prediction(classifiers,data):
+  predictions = np.empty((len(classifiers),len(data),n_outputs))
+  for num,classifier in enumerate(classifiers):
+    predictions[num] = classifier.predict(data)
+  return np.divide(predictions.sum(axis=0),np.full(predictions.shape[1:],predictions.shape[0]))
+
+"""###FEDERATED ACCURACY FUNCTION"""
+
+def federated_accuracy(y_test,y_pred):
+  correct = 0
+  total = 0
+  for i in range(len(y_test)):
+      act_label = np.argmax(y_test[i])
+      pred_label = np.argmax(y_pred[i])
+      if(act_label == pred_label):
+          correct += 1
+      total += 1
+  accuracy = (correct/total)*100
+  return accuracy
+
+"""###FEDERATED MODEL EVALUATION"""
+
+def federated_model_evaluation(classifiers,num_of_test_records):
+  X_train, y_train, X_test, y_test = load_dataset(prefix="/content/drive/MyDrive/MiniProject/")
+  X_test_final = X_test[0:num_of_test_records]
+  y_test_final = y_test[0:num_of_test_records]
+  y_pred_final = federated_model_prediction(classifiers,X_test_final)
+  accuracy = federated_accuracy(y_test_final,y_pred_final)
+  return accuracy
+
+"""###FEDERATED MODEL RUN FUNCTION"""
+
+def run_federated_model(model,X_train_splitted,y_train_splitted,X_test_splitted,y_test_splitted):
+  classifiers = federated_model_training(model,X_train_splitted,y_train_splitted,X_test_splitted,y_test_splitted)
+  accuracy = federated_model_evaluation(classifiers,num_of_test_records=1000)
+  print("ACCURACY OF FEDERATED_MODEL is : ", accuracy)
+  return classifiers
+
+"""###LOADING THE DATASET"""
+
+X_train_splitted,y_train_splitted,X_test_splitted,y_test_splitted = split_and_load_dataset(prefix="/content/drive/MyDrive/MiniProject/",num_of_splits=3)
+#No of splits ideally are divisors of 10
+n_timesteps,n_features, n_outputs = X_train_splitted[0].shape[1], X_train_splitted[0].shape[2], y_train_splitted[0].shape[1]
+print("timesteps: ",n_timesteps,"features: ",n_features,"ouputs: ",n_outputs)
+
+"""###RUNNING THE FEDERATED MODEL"""
+
+classifiers = run_federated_model(model,X_train_splitted,y_train_splitted,X_test_splitted,y_test_splitted)
+print(score_list)
+avgarr=np.array(score_list)
+print(np.mean(avgarr))
