@@ -1,0 +1,373 @@
+### IMPORTING LIBRARIES
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from keras.models import Sequential
+from keras.layers import Dense
+from keras.layers import Flatten
+from keras.layers import Dropout
+from keras.layers import TimeDistributed
+from keras.layers.convolutional import Conv1D
+from keras.layers.convolutional import MaxPooling1D
+from keras.utils import to_categorical
+from keras import backend as K
+from keras.callbacks import EarlyStopping, ModelCheckpoint
+from keras.models import load_model, model_from_json
+from keras.metrics import CategoricalAccuracy, CategoricalCrossentropy
+from keras.wrappers.scikit_learn import KerasClassifier
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import confusion_matrix, auc, roc_curve, roc_auc_score, precision_score, recall_score, f1_score, accuracy_score, classification_report
+from numpy.random import seed
+from tensorflow import random
+from scipy.optimize import differential_evolution
+from numpy import mean
+from numpy import std
+from numpy import array
+from numpy import argmax
+from numpy import tensordot
+import time
+from numpy.linalg import norm
+from sklearn.metrics import ConfusionMatrixDisplay
+from sklearn.datasets import make_classification
+#from mlxtend.plotting import plot_decision_regions
+from sklearn.svm import SVC
+from sklearn import metrics
+from tkinter import *
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+n_models=int(1)
+test_records=int(100)
+count1=int(0)
+count2=int(0)
+n=10
+m=2
+acr = [[0 for j in range(m)] for i in range(n)]
+final_acr=float(100.00)
+global_confusion_matrix = None
+import gradio as gr
+import cv2
+import io
+from PIL import Image
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+graphs=[]
+
+
+###DATASET LOAD FUNCTIONS
+
+def load_file(filepath):
+    dataframe = pd.read_csv(filepath, header=None, delim_whitespace=True)
+    return dataframe.values
+
+def load_group(filenames, prefix=''):
+    loaded = list()
+    for name in filenames:
+        data = load_file(prefix + name)
+        loaded.append(data)
+    loaded = np.dstack(loaded)
+    return loaded
+
+
+def load_dataset_group(group, prefix=''):
+    filepath = prefix + group + '/Inertial Signals/'
+    filenames = list()
+    filenames += ['total_acc_x_'+group+'.txt', 'total_acc_y_'+group+'.txt', 'total_acc_z_'+group+'.txt']
+    filenames += ['body_acc_x_'+group+'.txt', 'body_acc_y_'+group+'.txt', 'body_acc_z_'+group+'.txt']
+    filenames += ['body_gyro_x_'+group+'.txt', 'body_gyro_y_'+group+'.txt', 'body_gyro_z_'+group+'.txt']
+    X = load_group(filenames, filepath)
+    y = load_file(prefix + group + '/y_'+group+'.txt')
+    return X, y
+
+def load_dataset(prefix=''):
+    X_train, y_train = load_dataset_group('train', prefix + 'UCI-HAR Dataset/')
+    print("Train Shapes : ")
+    print(X_train.shape, y_train.shape)
+    X_test, y_test = load_dataset_group('test', prefix + 'UCI-HAR Dataset/')
+    print("Test Shapes : ")
+    print(X_test.shape, y_test.shape)
+    y_train = y_train - 1
+    y_test = y_test - 1
+    y_train = to_categorical(y_train)
+    y_test = to_categorical(y_test)
+    print("Shapes after one-hot encoding : ")
+    print(X_train.shape, y_train.shape, X_test.shape, y_test.shape)
+    return X_train, y_train, X_test, y_test
+
+
+###MODEL CONSTRUCTION
+
+
+def create_model(model):
+    print("Create_Model")
+    classifier = KerasClassifier(model, verbose=2)
+    return classifier
+
+def model():
+    print("Model")
+    global n_outputs
+    seed(17)
+    random.set_seed(17)
+    K.clear_session()
+    model = Sequential()
+    model.add(Conv1D(filters=64, kernel_size=2, activation='relu',input_shape=(n_timesteps,n_features)))
+    model.add(Conv1D(filters=64, kernel_size=3, activation='relu'))
+    model.add(Dropout(0.5))
+    model.add(MaxPooling1D(pool_size=2))
+    model.add(Flatten())
+    model.add(Dense(100, activation='relu'))
+    model.add(Dense(n_outputs, activation='softmax'))
+    model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+    return model
+
+
+###GRIDSEARCH FOR HYPERPARAMETER OPTIMIZATION
+
+
+def grid(classifier,X_train,y_train):
+    print("Grid")
+    batch_size = [8,32]
+    epochs = [10,20]
+    validation_split=[0.2]
+    param_grid = dict(batch_size=batch_size, epochs=epochs, validation_split=validation_split)
+    grid = GridSearchCV(estimator=classifier, param_grid=param_grid, n_jobs=-1, cv=5, return_train_score=True, verbose=2)
+    grid_result = grid.fit(X_train, y_train)
+    print("Best: %f using %s" % (grid_result.best_score_, grid_result.best_params_))
+    means = grid_result.cv_results_['mean_test_score']
+    stds = grid_result.cv_results_['std_test_score']
+    params = grid_result.cv_results_['params']
+    for mean, stdev, param in zip(means, stds, params):
+        print("%f (%f) with: %r" % (mean, stdev, param))
+    return grid_result
+
+
+###MODEL EVALUATOR
+
+
+def evaluate_model(X_train, y_train, X_test, y_test, params, model):
+    print("Evaluate_Model")
+    epochs, batch_size = params["epochs"], params["batch_size"]
+    es =EarlyStopping(monitor='val_loss', patience=5)
+    classifier=model()
+    history = classifier.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, verbose=2, validation_split=0.2, callbacks=[es])
+    _, accuracy = classifier.evaluate( X_test, y_test, batch_size=batch_size, verbose=0)
+    return history, accuracy, classifier
+
+
+###PLOT LOSS FUNCTION
+
+
+def plot_loss(results):
+    print("Plot_Loss")
+    global count1
+    global graphs
+    count1+=1
+    plt.style.use('seaborn-whitegrid')
+    sns.set(style="white", font_scale = 1.5)
+    fig, axes = plt.subplots(1, 1, figsize=(20, 10), sharex=True)
+    data1=[]
+    data2=[]
+    df1 = pd.DataFrame(dict(train=results['accuracy']))
+    df2 = pd.DataFrame(dict(test=results['val_accuracy']))
+    plt.title(f"Model Accuracy for Worker-{count1}")
+    plt.ylabel('Accuracy')
+    plt.xlabel("No. of epochs")
+    plt.ylim(0.5,1)
+    df1['train'].plot(kind='bar', color='purple', position=0, width=0.4)
+    df1['train'].plot(kind='line', marker='*', color='red', ms=10)
+    df2['test'].plot(kind='bar', color='cyan', position=1, width=0.4)
+    df2['test'].plot(kind='line', marker='*', color='black', ms=10)
+    plt.legend()
+    canvas = FigureCanvas(fig)
+    buf = io.BytesIO()
+    canvas.print_png(buf)
+
+# store the image in a global variable
+    graphs.append(buf.getvalue())
+    #plt.show()
+    
+###RUN MODEL FUNCTION
+
+
+def run_model(model, grid_result, X_train, y_train, X_test, y_test):
+    print("Run_Model")
+    global count2
+    history, score, classifier = evaluate_model(X_train, y_train, X_test, y_test, grid_result.best_params_, model)
+    score = score * 100.0
+    #print('ACCURACY > %.3f' % (score))
+    global acr
+    acr[count2][0]= f"Accuracy of Worker-{count2} :"
+    acr[count2][1]=f"{score}"
+    count2+=1
+    results=pd.DataFrame(history.history, index=history.epoch)
+    return score,results, classifier
+
+def run(model, X_train, y_train, X_test, y_test):
+    print("Run")
+    classifier=create_model(model)
+    grid_result=grid(classifier,X_train,y_train)
+    score, results, classifier=run_model(model, grid_result, X_train, y_train, X_test, y_test)
+    plot_loss(results)
+    return classifier,score
+
+##FEDERATED LEARNING
+
+###LOAD and SPLIT DATASET
+
+
+def split_and_load_dataset(prefix,num_of_splits,num_of_models):
+  print("Load and Split Dataset")
+  print(num_of_models)
+  X_train, y_train, X_test, y_test = load_dataset(prefix=prefix)
+  X_train_splitted = np.split(X_train[:7350],num_of_splits,axis=0)
+  y_train_splitted = np.split(y_train[:7350],num_of_splits,axis=0)
+  X_test_splitted = np.split(X_test[:2940],num_of_splits,axis=0)
+  y_test_splitted = np.split(y_test[:2940],num_of_splits,axis=0)
+  print("Sizes of each Split : ")
+  print(X_train_splitted[0].shape,y_train_splitted[0].shape,X_test_splitted[0].shape,y_test_splitted[0].shape)
+  return X_train_splitted[:num_of_models],y_train_splitted[:num_of_models],X_test_splitted[:num_of_models],y_test_splitted[:num_of_models]
+
+
+###FEDERATED MODEL TRAINING
+
+
+def federated_model_training(model,X_train_splitted,y_train_splitted,X_test_splitted,y_test_splitted):
+  print("Federated Model Training")
+  classifiers = []
+  scores = []
+  for i in range(0,len(X_train_splitted)):
+    print("-------------------> Running model number : "+str(i+1))
+    classifier, score = run(model,X_train_splitted[i],y_train_splitted[i],X_test_splitted[i],y_test_splitted[i])
+    classifiers.append(classifier)
+    scores.append(score)
+    print("Scoressss")
+    print(scores)
+  return classifiers,scores
+
+
+###FEDERATED MODEL COMBINED PREDICTION
+
+
+def federated_model_prediction(classifiers,scores,data):
+  print("Federated Model Prediction")
+  global n_outputs
+  predictions = np.empty((len(classifiers),len(data),n_outputs))
+  print("Scores")
+  print(scores)
+  for num,classifier in enumerate(classifiers):
+    scaling_factor = scores[num]
+    prediction_matrix = classifier.predict(data)
+    scaling_matrix = np.full(prediction_matrix.shape,scaling_factor)
+    predictions[num] = np.multiply(prediction_matrix,scaling_matrix)
+  return np.divide(predictions.sum(axis=0),np.full(predictions.shape[1:],sum(scores)))
+
+
+###FEDERATED ACCURACY FUNCTION
+
+
+def federated_accuracy(y_test,y_pred):
+  print("Federated Accuracy")
+  correct = 0
+  total = 0
+  for i in range(len(y_test)):
+      act_label = np.argmax(y_test[i])
+      pred_label = np.argmax(y_pred[i])
+      if(act_label == pred_label):
+          correct += 1
+      total += 1
+  accuracy = (correct/total)*100
+  y_pred_labels = np.argmax(y_pred, axis=1)
+  y_test_labels = np.argmax(y_test, axis=1)
+  global global_confusion_matrix
+  confusion_matrix = metrics.confusion_matrix(y_test_labels, y_pred_labels)
+  labels=['WALKING', 'W_UPSTAIRS', 'W_DOWNSTAIRS', 'SITTING', 'STANDING', 'LAYING']
+  cm_display = metrics.ConfusionMatrixDisplay(confusion_matrix = confusion_matrix, display_labels = ['WALKING', 'W_UPSTAIRS', 'W_DOWNSTAIRS', 'SITTING', 'STANDING', 'LAYING'])
+  fig, ax = plt.subplots(figsize=(6, 6))
+  cm_display.plot(ax=ax)
+  ax.set_title('Confusion Matrix')
+  ax.set_ylabel('True label')
+  ax.set_xlabel('Predicted label')
+  plt.tight_layout()
+  #cm_display.plot()
+  plt.savefig('confusion_matrix.png')
+  global_confusion_matrix = cv2.imread('confusion_matrix.png')
+  plt.show()
+  return accuracy
+
+
+###FEDERATED MODEL EVALUATION
+
+
+def federated_model_evaluation(classifiers,scores,num_of_test_records):
+  print("Federated_Model_Evaluation")
+  X_train, y_train, X_test, y_test = load_dataset(prefix="C:/MiniProject/")
+  global test_records
+  num_of_test_records=test_records
+  print(num_of_test_records)
+  X_test_final = X_test[0:num_of_test_records]
+  y_test_final = y_test[0:num_of_test_records]
+  y_pred_final = federated_model_prediction(classifiers,scores,X_test_final)
+  accuracy = federated_accuracy(y_test_final,y_pred_final)
+  return accuracy,y_pred_final
+
+
+###FEDERATED MODEL RUN FUNCTION
+
+
+def run_federated_model(model,X_train_splitted,y_train_splitted,X_test_splitted,y_test_splitted):
+  print("Run_Federated_Model")
+  classifiers, scores = federated_model_training(model,X_train_splitted,y_train_splitted,X_test_splitted,y_test_splitted)
+  accuracy,y_pred_final = federated_model_evaluation(classifiers,scores,num_of_test_records=test_records)
+  #print("ACCURACY OF FEDERATED_MODEL is : ", accuracy)
+  global final_acr
+  final_acr=accuracy
+  return classifiers, y_pred_final
+
+
+###LOADING THE DATASET
+
+
+#X_train_splitted=[], y_train_splitted=[], X_test_splitted=[], y_test_splitted=[]
+def data():
+    print("data")
+    global n_models, n_outputs, n_timesteps, n_features
+    global X_train_splitted, y_train_splitted, X_test_splitted, y_test_splitted
+    X_train_splitted,y_train_splitted,X_test_splitted,y_test_splitted = split_and_load_dataset(prefix="C:/MiniProject/",num_of_splits=10,num_of_models=n_models)
+    #No of splits ideally are divisors of 10
+    n_timesteps,n_features, n_outputs = X_train_splitted[0].shape[1], X_train_splitted[0].shape[2], y_train_splitted[0].shape[1]
+    print("timesteps: ",n_timesteps,"features: ",n_features,"ouputs: ",n_outputs)
+
+
+###RUNNING THE FEDERATED MODEL
+
+
+def final_run(num_models, num_test):
+    prog = gr.Interface.ProgressBar(len(inputs))
+    print("Final_run")
+    global n_models
+    n_models=int(num_models)
+    global test_records
+    test_records=int(num_test)
+    print(n_models, test_records)
+    data()
+    global X_train_splitted, y_train_splitted, X_test_splitted, y_test_splitted
+    classifiers, y_pred_final = run_federated_model(model,X_train_splitted,y_train_splitted,X_test_splitted,y_test_splitted)
+    global graphs
+    global acr
+    global global_confusion_matrix
+    global final_acr
+    print(acr)
+    return acr, global_confusion_matrix, final_acr
+
+
+inputs = [gr.inputs.Number( label="Number of Models"), gr.inputs.Number(label="Number of Test Records")]
+#graph_output = gr.outputs.Image(type="numpy", label="Graph")
+text_matrix_output = gr.outputs.Textbox(label="Accuracies of Each Model")
+confusion_matrix_output = gr.outputs.Image(type="numpy", label="Confusion Matrix")
+number_output = gr.outputs.Textbox(label="Accuracy of Federated Model:")
+# Create a Gradio interface
+#interface = gr.Interface(fn=final_run, inputs=inputs, outputs=[graph_output, text_matrix_output, confusion_matrix_output, number_output])
+interface = gr.Interface(fn=final_run, inputs=inputs, outputs=[text_matrix_output, confusion_matrix_output, number_output], time_limit=600000000000)
+interface.infer_command = "Please wait while the function is running..."
+
+interface.launch(share=True)
+# Create a list of key-value pairs for the gallery
